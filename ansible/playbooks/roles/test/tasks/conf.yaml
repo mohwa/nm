@@ -1,0 +1,4 @@
+- name: Add default conf file
+template:
+  src: templates/default.conf.j2
+  dest: 'default.conf'

@@ -1,0 +1,24 @@
+---
+- hosts: ansible
+  roles:
+    - test
+  # 아래의 task를 sudo권한으로 실행할거면 “yes”
+  # become: yes
+  tasks:
+    - name: "Start hello world"
+      test_module:
+      register: output
+    - debug: msg="{{output}}"
+  vars:
+#-
+#    - debug: msg="{{install_result.stdout_lines}}"
+#    - name: shell command
+#      shell: " ls -al > dirlist.txt "
+#      register: lsout
+#      tags: lsout
+#
+#    - name: Display the file
+#      shell: cat dirlist.txt
+#      register: displaylist
+#
+#    - debug: msg="{{displaylist.stdout_lines}}"
