@@ -2,15 +2,14 @@
 
 from celery_test import run
 
-result = run.apply_async()
+""" result = run.apply_async()
 
 while True:
-
     if result.state == 'SUCCESS':
         newResult = result.result
         break
 
-print(newResult)
+print(newResult) """
 
 # is_ready = result.ready()
 #

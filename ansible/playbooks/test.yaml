@@ -1,15 +1,52 @@
 ---
-- hosts: ansible
-  roles:
-    - test
+
+- name: "START ANSIBLE TEST"
+#  hosts: all
+  hosts: ansible
+  gather_facts: False
+#  gather_subset: min
+  # role 은 하나의 task 를 만드는 모든 요소들을 포함할 수 있는 단위라고 생각하면된다.
+  # 즉 재사용 가능한 task 리스트을 갖고있고, 이를 통해, 체계화된 task 모음을 playbook 에 추가시켜 사용할 수 있는것이다
+#  roles:
+#    - test
+  tasks:
+    - name: "Ping test"
+      ping:
+    - name: "Start Test Module"
+      #  https://skyoo2003.github.io/post/2017/11/14/ansible-module-develop
+      # global module 생성하기
+      #  http://blog.toast38coza.me/custom-ansible-module-hello-world
+      global_test_module:
+      register: result
+    - debug: msg="{{result.msg}}"
+
+#- name: "Start test module"
+#  hosts: ansible
+#  roles:
+#    - test
   # 아래의 task를 sudo권한으로 실행할거면 “yes”
   # become: yes
-  tasks:
-    - name: "Start hello world"
-      test_module:
-      register: output
-    - debug: msg="{{output}}"
-  vars:
+#  tasks:
+#    - test_module:
+#       register 를 정의해야 artifact 의 job_events 에 stdout 을 채운다.
+#      register: result
+#    module.exit_json(
+#    changed=True,
+#    msg=stdout,
+#    type=str(type(stdout))
+#    # ansible 이 artifects 내부에 남기는 (로그)데이터
+#    #         msg=(stdout.strip())
+#    )
+     # test_module.py 에서 반환한 dict 객체를 output.msg 처럼 반환할 수 있는것이다.
+     # 특정 커맨드의 stdout 을 가져오는 방법(https://serverfault.com/questions/537060/how-to-see-stdout-of-ansible-commands)
+     # 이렇게 가져온 stdout 은 artifact 내용에 포함된다(그 job_events 를 파싱해서 최종 결과를 반환하는것이다)
+#    - debug: msg="{{result.msg}}"
+#    - debug: msg="{{ output.stdout_lines }}"
+#    - debug:
+#      var: output
+#      set_fact:
+#        gtm_pool: "{{ output.stdout_lines }}"
+#  vars:
 #-
 #    - debug: msg="{{install_result.stdout_lines}}"
 #    - name: shell command
@@ -22,3 +59,14 @@
 #      register: displaylist
 #
 #    - debug: msg="{{displaylist.stdout_lines}}"
+
+  # set_fact 활용
+#    - set_fact:
+#        pool_names: "{{ output.stdout.0 | get_pool_names }}"
+#
+#    - debug:
+#        msg: "processing pool: {{ item }}"
+#      loop: "{{ pool_names }}"
+
+
+#  https://www.python2.net/questions-1077749.htm

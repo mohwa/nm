@@ -42,15 +42,21 @@ def main():
 #     new_stdout = unicode(stdout, 'unicode-escape')
 #     print(type(new_stdout))
 
+#     if len(stdout) == 0
+
 
     # 성공적인 리턴은 다음과 같이 구성됩니다.
+#     if rc == 0:
     module.exit_json(
-        changed=True,
-        version=stdout,
-        type=str(type(stdout))
+#         changed=True,
+        changed=(rc == 0),
+        msg=stdout
+#         type=str(type(stdout))
         # ansible 이 artifects 내부에 남기는 (로그)데이터
 #         msg=(stdout.strip())
     )
+#     else:
+#         module.fail_json(msg="error")
 
 
 
