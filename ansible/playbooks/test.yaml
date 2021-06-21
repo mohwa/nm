@@ -7,8 +7,8 @@
 #  gather_subset: min
   # role 은 하나의 task 를 만드는 모든 요소들을 포함할 수 있는 단위라고 생각하면된다.
   # 즉 재사용 가능한 task 리스트을 갖고있고, 이를 통해, 체계화된 task 모음을 playbook 에 추가시켜 사용할 수 있는것이다
-#  roles:
-#    - test
+  roles:
+    - test
   tasks:
     - name: "Ping test"
       ping:
@@ -16,7 +16,8 @@
       #  https://skyoo2003.github.io/post/2017/11/14/ansible-module-develop
       # global module 생성하기
       #  http://blog.toast38coza.me/custom-ansible-module-hello-world
-      global_test_module:
+#      global_test_module:
+      test_module:
       register: result
     - debug: msg="{{result.msg}}"
 

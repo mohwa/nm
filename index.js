@@ -4,11 +4,14 @@ const { app, BrowserWindow, ipcMain, Menu, Notification } = require('electron');
 const { spawnSync } = require('child_process');
 const fs = require('fs-extra');
 
-const ETC_PATH = path.resolve(__dirname, 'etc');
-const TMP_PATH = path.resolve(__dirname, 'var/tmp');
-const PID_PATH = path.resolve(__dirname, 'var/pid');
-const LOG_PATH = path.resolve(__dirname, 'var/log');
-const CLIENT_PATH = path.resolve(__dirname, 'client');
+const BASE_PATH = path.resolve(__dirname);
+const ETC_PATH = path.resolve(BASE_PATH, 'etc');
+const TMP_PATH = path.resolve(BASE_PATH, 'var/tmp');
+const PID_PATH = path.resolve(BASE_PATH, 'var/pid');
+const LOG_PATH = path.resolve(BASE_PATH, 'var/log');
+const CLIENT_PATH = path.resolve(BASE_PATH, 'client');
+const API_PATH = path.resolve(CLIENT_PATH, 'api');
+const ANSIBLE_PATH = path.resolve(BASE_PATH, 'ansible');
 
 const PID_FILE_PATH = {
   GUNICORN: `${PID_PATH}/gunicorn.pid`,
@@ -17,6 +20,7 @@ const PID_FILE_PATH = {
 
 const CONF_FILE_PATH = {
   REDIS: `${ETC_PATH}/redis.conf`,
+  REDIS_SHELL: `${ETC_PATH}/redis_shell.conf`,
 };
 
 const LOG_FILE_PATH = {
@@ -27,11 +31,16 @@ const LOG_FILE_PATH = {
 };
 
 const REDIS_SOCK_FILE_PATH = `${TMP_PATH}/nm.redis.sock`;
-const DJANGO_MODULE_NAME = 'nm';
+const CELERY_MODULE_NAME = 'nm';
+// pure_celery.worker, pure_celery.worker.app 둘다 가능하다.
+// pure_celery.worker == celery app 인스턴스를 import 할 수 있는 위치를 지정해주면되는듯하다.
+// 다만 .app 으로 해당 인스턴스 이름까지 지정해도 무방한듯하다.
+const CELERY_MODULE_NAME_FOR_SHELL = 'pure_celery.worker';
 const CELERY_NODE_NAME = {
   DEFAULT: 'default',
 };
 
+// 1 min
 const HTTP_RESPONSE_TIMEOUT = 3600;
 
 // 관련 이슈
@@ -53,7 +62,7 @@ function createWindow () {
       // contextIsolation: false,
       // enableRemoteModule: true,
     },
-  })
+  });
 
   win.loadFile('index.html')
 }
@@ -240,16 +249,20 @@ app.on('before-quit', () => {
 
 
   // 임시 코드
-  getPidsByName('redis').forEach((value) => {
-    console.log('redis', killBy(value));
+  getPidsByName('redis').forEach((id) => {
+    console.log('redis', killBy(id));
   });
 
-  getPidsByName('celery').forEach((value) => {
-    console.log('celery', killBy(value));
+  getPidsByName('celery').forEach((id) => {
+    console.log('celery', killBy(id));
   });
 
-  getPidsByName('gunicorn').forEach((value) => {
-    console.log('gunicorn', killBy(value));
+  getPidsByName('watchdogd').forEach((id) => {
+    console.log('watchdogd', killBy(id));
+  });
+
+  getPidsByName('gunicorn').forEach((id) => {
+    console.log('gunicorn', killBy(id));
   });
 
   execSync({ cmd: `rm -f ${PID_PATH}/*` });
@@ -294,10 +307,14 @@ function commandWithRun(value, hasDelay = false, delayTime = 1) {
   }
 }
 
-// shell.exec 를 한다는 의미는 부모 프로세스에서 별도의 자식 프로세스를 만들어, 관련 command 를 실행한다는의미이고, 이렇게 명령 수행을위해 생성된 자식 프로세스는 명령 수행 후, 자동으로 소멸된다
-// ps -e 라는 커맨드만 입력해도 항상 명령 수행을 위한, 프로세스가 생겼다, 소멸되는것을 볼 수 있다.
-// 또 shell.exec(cd ${path}) 라는 명령을 수행해도, exec 에서 수행되는 커맨드는 별도의 셀에서 실행되므로, 해당 명령은 해당 프로세스에서만 영행을 미치고 종료됩니다.
+// shell.exec 함수를 호출하면, 부모 프로세스에서 별도의 자식 프로세스를 만들어 해당 command 를 실행하고, 명령을 수행하기위해 생성된 "자식 프로세스"는 수행 후, 자동으로 소멸(kill)된다.
+// 즉 "ps -e" command 만 입력해도, 명령 수행을 위한 "자식 프로세스"가 생겼다, 소멸되는것을 볼 수 있다.
+
+// 또 "shell.exec(cd ${path})" 함수를 수행할 경우, 해당 커맨드는 별도 프로세스에서 실행되므로, 해당 명령은 해당 프로세스("자식 프로세스")에만 영향을 미치고 종료됩니다.
+// "메인 프로세스"는 영향을 받지않는다. < 즉 커맨드를 수행한 명령 프롬프트의 Path 는 변경되지않는다.
+
 // https://www.javaer101.com/ko/article/2661918.html
+
 // 그래서 여기를 보면(https://nodejs.org/api/child_process.html#child_process_child_process_exec_command_options_callback) cwd 라는 옵션이 있음
 function execSync({ cmd, hasDelay, delayTime, silent = true }) {
   const result = shell.exec(commandWithRun(cmd, hasDelay, delayTime), { silent });
@@ -340,6 +357,7 @@ function getPgIdOf(pid) {
 }
 
 function getPidsByName(name) {
+  // "grep -v grep": grep 으로 생성된 프로세스 목록을 제외한다.
   const cmd = `ps -e | grep ${name} | grep -v grep | awk '{ print $1 }'`;
   const result = execSync({ cmd });
 
@@ -353,28 +371,32 @@ function getPidsByName(name) {
 function getPid(pid) {
   const cmd = `ps -p ${pid} | awk '{print $1 }' | tail -1`;
   const result = execSync({ cmd, hasDelay: true });
+  const { code, stdout } = result;
 
-  if (result.code === 0) {
-    return parseInt(result.stdout);
+  if (code === 0) {
+    return parseInt(stdout);
   }
-  return null;
+  return -1;
 }
 
 function isExistsPid(pid) {
-  return getPid(pid) ? true : false;
+  return getPid(pid) > -1 ? true : false;
 }
 
 function getPidAtFile(filePath) {
   const cmd = `cat ${filePath}`;
   const result = execSync({ cmd });
+  const { code, stdout } = result;
 
-  if (result.code === 0) {
-    return parseInt(result.stdout);
+  if (code === 0) {
+    return parseInt(stdout);
   }
-  return null;
+  return -1;
 }
 
+// awk: 특정 결과를 원하는 패턴으로 가공할 수 있는 명령어이다.(거의 프로그램언어에 가깝다)
 function getCPUCoreCount() {
+  // sysctl 은 맥 OS 에서만 가능하다.
   const cmd = "sysctl hw.ncpu | awk '{print $2}'";
   const result = execSync({ cmd });
 
@@ -453,6 +475,8 @@ let startDjango;
 let startRedis;
 let checkRedisStart;
 let startCelery;
+// pipenv run 을 통해, 해당 프로젝트에 설정된 python 환경을 사용할 수 있다(인터프리터를 사용할 수 있다)
+// https://www.daleseo.com/python-pipenv/
 const PREFIX_COMMAND = 'pipenv run';
 
 ipcMain.on('start-server', (event, arg) => {
@@ -464,10 +488,13 @@ ipcMain.on('start-server', (event, arg) => {
 
   // conda activate 는 shell interactive mode 에서만 동작한다고한다.
   // 대신 conda run -n env pyenv39 test.py 같은 식으로 환경 설정 + 명령을 조합한 방식으로 실행 가능하지만, 여러 커멘드를 실행할때, 좋은 방법이 아닌듯하다.
-  // 더 중요한건 conda run 명령의 경우, 실행 후, 아무 응답(stdout, stderr 등)도 받을 수 없다. 히 현상을 아래 이슈에선 stdout delay 이슈라고 말하는듯하다.
-  // 아무 응답도 받을 수 없다라는건, 특정 커맨드의 경우, 동기식으로 선행 명령이 완료된 후, 반드시 그 다음 명령을 수행해야할때도 있는데, 그런 경우, 아무런 output 을 받을 수 없으니, 그 호출 시점을 정확히 알기 힘들다는것이다.
-  // 즉 conda run 으로 해결하는 가능한 상황은 여러 명령이 순차처리될 필요가 없는 경우일것이다.
+  // 더 중요한건 conda run 명령의 경우, 실행 후, 아무 응답(stdout, stderr 등)도 받을 수 없다. 이 현상을 아래 이슈에선 stdout delay 이슈라고 말하는듯하다.
+  // 아무 응답도 받을 수 없다라는건, 특정 커맨드의 경우, 동기식으로 여러 명령을 수행해야할때가 있는데, 그런 경우, 아무런 output 을 받을 수 없으니, 두 번째 호출 시점을 정확히 잡기 힘들다는것이다.(특정 조건에 의한 호출일 수도있다)
+
+  // 즉 conda run 으로 해결하는 가능한 상황은 여러 명령이 동기적으로 순차처리될 필요가 없는 경우일것이다.
+
   // https://github.com/conda/conda/issues/8386
+
   // const createVirtualEnv = shell.exec(`bash shells/create_env.sh`, { silent: false, async: false });
 
   // if (createVirtualEnv.code === 0) {
@@ -475,12 +502,15 @@ ipcMain.on('start-server', (event, arg) => {
 
   // https://young-blog.tistory.com/29
   // https://stackoverflow.com/questions/15629923/nodejs-exec-does-not-work-for-cd-shell-cmd
-  // exec(cd...) 가 부모 셀에 영향을 주지않는 이유
+
+  // exec(cd...) 가 부모 프로세스에 영향을 주지않는 이유
+  // shell.cd 함수는 부모 프로세스에서 실행된다.
   shell.cd(CLIENT_PATH);
 
-  const startDjangoCommand = `python manage.py collectstatic --no-input`;
+  // manage.py 에 설정된 resource static 파일들을 dist path 로 복사한다.
+  const startDjangoCmd = 'python manage.py collectstatic --no-input';
 
-  const startDjango = execSync({ cmd: startDjangoCommand, silent: false });
+  const startDjango = execSync({ cmd: startDjangoCmd, silent: false });
 
   if (startDjango.code === 0) {
 
@@ -488,57 +518,111 @@ ipcMain.on('start-server', (event, arg) => {
 
     startGunicornCommand.push('gunicorn');
     // https://docs.gunicorn.org/en/stable/settings.html#reload
+    // python 파일 수정 시, 자동으로 서버를 restart 한다.
     startGunicornCommand.push('--reload');
+    // demon 으로 실행한다(background 로 실행한다)
     startGunicornCommand.push('-D');
     startGunicornCommand.push(`-p ${PID_FILE_PATH.GUNICORN}`);
+    // --workers: gunicorn 이 사용할 worker(자식) 프로세스 수를 정의한다.
+    // 만약 "-w 9" 일 경우, 9개의 자식 프로세스와 1개의 메인 프로세스가 생성된다.
+
+    // http://hell0-world.com/architecture/2020/05/10/gunicorn.html
     startGunicornCommand.push(`-w ${(CPU_CORE_COUNT * 2) + 1}`);
+    // --bind: http 대신 socket 을 통해 통신한다.
+    // 0:8000 번 포트로 guicorn(WSGI) 서버를 수행한다.
     startGunicornCommand.push(`-b 127.0.0.1:8080`);
+    // 어플리케이션의 root path 를 지정한다.
     startGunicornCommand.push(`--chdir ${CLIENT_PATH}`);
     startGunicornCommand.push(`--access-logfile ${LOG_FILE_PATH.GUNICORN.ACCESS}`);
+    // log file path 를 설정한다.
     startGunicornCommand.push(`--log-file ${LOG_FILE_PATH.GUNICORN.DEFAULT}`);
     startGunicornCommand.push(`--timeout ${HTTP_RESPONSE_TIMEOUT}`);
+    // WSGI 서버가 호출하는 어플리케이션이 nm/wsgi.py 파일의 application 이라는 의미이다.
+    // wsgi.py 파일에서 get_wsgi_application 을 통해, 생성도니 application 이 반환된다.
+    // 즉 이 파일을 통해, WSGI 서버가 Django 어플리케이션을 호출한다.
+
+    // 참고로 장고는 WSGI 서버를 내장하고있다(python manage.py runserver 로 동작하는 서버)
+    // Django 는 단일 쓰레드를 사용한다. 즉 request 가 많이지면 현저히 느려지는 단점이 있다.
     startGunicornCommand.push('nm.wsgi:application');
 
-    const startGunicorn = execSync({cmd: startGunicornCommand.join(' '), silent: false});
+    const startGunicorn = execSync({ cmd: startGunicornCommand.join(' '), silent: false });
 
     if (startGunicorn.code === 0) {
       shell.cd('..');
 
-      const startRedisServer = execSync({cmd: `redis-server ${CONF_FILE_PATH.REDIS}`, silent: false});
+      const startRedisServer = execSync({ cmd: `redis-server ${CONF_FILE_PATH.REDIS}`, silent: false });
+      const startRedisServerForShell = execSync({ cmd: `redis-server ${CONF_FILE_PATH.REDIS_SHELL}`, silent: false });
 
       // socket 파일 지정하는 부분은 나중에 다시 확인해보자
-      const checkRedisStart = execSync({cmd: `redis-cli ping`});
+      const checkRedisStart = execSync({ cmd: `redis-cli -p 6379 ping` });
+      const checkRedisStartForShell = execSync({ cmd: `redis-cli -p 6380 ping` });
 
-      if (startRedisServer.code === 0 && checkRedisStart.code === 0) {
+      if (
+        startRedisServer.code === 0
+        && startRedisServerForShell.code === 0
+        && checkRedisStart.code === 0
+        && checkRedisStartForShell.code === 0
+      ) {
+        console.log('startRedisServerForShell', startRedisServerForShell);
 
         shell.cd(CLIENT_PATH);
 
         // https://jiyekim.github.io/django/celery/
         // celery multi 명령어를 이용하면 worker를 background에서 실행할 수 있다
+      //   watchmedo auto-restart \
+      // --recursive --ignore-directories \
+      // -d ${WEBAPP_DIR}/usertask -d ${WEBAPP_DIR}/tower_api -d ${WEBAPP_DIR}/internal_api \
+      // -d ${WEBAPP_DIR}/utilities -d ${WEBAPP_DIR}/ntower -d ${WEBAPP_DIR}/tower_main \
+      // -p '*.py' \
+      // -- sh ${SCRIPTS_DIR}/run_webapp.sh restart_celery >>${watchdog_celery_log_file} 2>&1 &
+
         const startCeleryCommand = [];
-        startCeleryCommand.push(`celery multi start ${CELERY_NODE_NAME.DEFAULT}`);
-        startCeleryCommand.push(`-A ${DJANGO_MODULE_NAME} -l info`);
+        startCeleryCommand.push(`watchmedo auto-restart --directory=./ --pattern=*.py --recursive`);
+        startCeleryCommand.push(`-- celery multi restart ${CELERY_NODE_NAME.DEFAULT}`);
+        startCeleryCommand.push(`-A ${CELERY_MODULE_NAME} -l DEBUG`);
         // max, min
         // https://docs.celeryproject.org/en/latest/userguide/workers.html#autoscaling
         startCeleryCommand.push('--autoscale=10,0');
         // startCeleryCommand.push(`-Q:${CELERY_NODE_NAME.DEFAULT} ${CELERY_NODE_NAME.DEFAULT}`);
-        // $n 은 위에서 설정된 node name 이다.
+        // %n 은 위에서 설정된 node name 이다.
 
         /**
         // 이전 프로세스 파일들을 전부 삭제해야한다.
         // 그렇지않으면, 셀러리 서버 실행 시, 오류가 발생한다.
          **/
         startCeleryCommand.push(`-E --pidfile=${PID_PATH}/celery-%n.pid`);
-        startCeleryCommand.push(`--logfile=${LOG_PATH}/celery-%n%I.log`);
+        startCeleryCommand.push(`--logfile=${LOG_PATH}/celery-%n%I.log >> ${LOG_PATH}/watchdog.log 2>&1 &`);
 
         console.log(startCeleryCommand.join(' '));
 
-        const startCelery = execSync({cmd: startCeleryCommand.join(' ')});
+        const startCelery = execSync({ cmd: startCeleryCommand.join(' ') });
 
-        console.log(startCelery);
+        const startCeleryCommandForShell = [];
+        startCeleryCommandForShell.push(`watchmedo auto-restart --directory=./ --pattern=*.py --recursive`);
+        startCeleryCommandForShell.push(`-- celery multi restart ${CELERY_NODE_NAME.DEFAULT}`);
+        startCeleryCommandForShell.push(`-A ${CELERY_MODULE_NAME_FOR_SHELL} -l DEBUG`);
+        // max, min
+        // https://docs.celeryproject.org/en/latest/userguide/workers.html#autoscaling
+        startCeleryCommandForShell.push('--autoscale=10,0');
+        // startCeleryCommand.push(`-Q:${CELERY_NODE_NAME.DEFAULT} ${CELERY_NODE_NAME.DEFAULT}`);
+        // %n 은 위에서 설정된 node name 이다.
 
-        if (startCelery.code === 0) {
-          event.reply('start-server', startCelery.code);
+        /**
+         // 이전 프로세스 파일들을 전부 삭제해야한다.
+         // 그렇지않으면, 셀러리 서버 실행 시, 오류가 발생한다.
+         **/
+        startCeleryCommandForShell.push(`-E --pidfile=${PID_PATH}/celery-shell-%n.pid`);
+        startCeleryCommandForShell.push(`--logfile=${LOG_PATH}/celery-shell-%n%I.log >> ${LOG_PATH}/watchdog-shell.log 2>&1 &`);
+
+        const startCeleryForShell = execSync({ cmd: startCeleryCommandForShell.join(' ') });
+
+        console.log(startCeleryCommandForShell.join(' '));
+
+        if (
+          startCelery.code === 0
+          && startCeleryForShell.code === 0
+        ) {
+          event.reply('start-server', startCelery.code, startCeleryForShell.code);
         }
       }
 
@@ -625,39 +709,41 @@ ipcMain.on('start-server', (event, arg) => {
 });
 
 ipcMain.on('stop-server', (event, arg) => {
-  // startRedis.kill('SIGINT');
-  // checkRedisStart.kill('SIGINT');
-  // startCelery.kill('SIGINT');
+  // 임시 코드
+  // 프로세스 이름이 아닌, pid 파일의 내용을 기준으로 kill 하자!!!
+  getPidsByName('redis').forEach((id) => {
+    console.log('redis', killBy(id));
+  });
 
-  // console.log(startRedis);
-  // console.log(checkRedisStart);
-  // console.log(startCelery);
+  getPidsByName('celery').forEach((id) => {
+    console.log('celery', killBy(id));
+  });
+
+  getPidsByName('watchdogd').forEach((id) => {
+    console.log('watchdogd', killBy(id));
+  });
+
+  getPidsByName('gunicorn').forEach((id) => {
+    console.log('gunicorn', killBy(id));
+  });
+
+  event.reply('start-server', 1);
 });
 
 
 ipcMain.on('run-task', (event, arg) => {
-  shell.cd('./ansible');
+  shell.cd(`${CLIENT_PATH}/pure_celery`);
 
-  const runTask = shell.exec(`python ./run.py`, { silent: true, async: true, encoding: 'utf-8' });
+  const { code, stdout } = execSync( { cmd: 'python run.py', silent: false });
 
-  runTask.stdout.on('data', (data) => {
-    // \n 제어문자가 포함되어있다(print는 기본적으로 출력하는 값 끝에 \n을 붙입니다)
-    // https://dojang.io/mod/page/view.php?id=1224
-    data = data.replace(/[\r\n]/g, '');
+  if (code === 0) {
+    console.log(stdout);
 
-    if (data === 'True') {
-      console.log(data);
-      event.reply('run-task', 'OK');
-    }
-  });
-
-  runTask.stderr.on('data', (data) => {
-    event.reply('run-task', data);
-  });
-
-  runTask.on('close', (code) => {
-    // event.reply('run-task', 'OK');
-  });
+    // run.py 파일에서 print 함수를 통해, 출력한 내용이 표준 출력(stdout)값으로 반환된다.
+    event.reply('run-task', stdout);
+  } else {
+    event.reply('run-task', 'ERROR');
+  }
 
   shell.cd('..');
 });
